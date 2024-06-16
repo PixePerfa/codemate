@@ -43,7 +43,7 @@ def test_chromadb():
 def test_qdrant():
     config = DBConfig(
         name="QDRANT",
-        path="https://b72e9ec5-8c05-4475-a387-d84fbbee7460.us-east4-0.gcp.cloud.qdrant.io:6333",
+        path="https://xxx.us-east4-0.gcp.cloud.qdrant.io:6333",
         collection_name="db_util_test",
         emb_name="OPENAI",
     )

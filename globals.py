@@ -1,1 +1,1 @@
-GPT_MODEL_NAME = "gpt-4o"
+GPT_MODEL_NAME = "gpt-4-0613"

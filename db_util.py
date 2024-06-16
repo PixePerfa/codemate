@@ -15,16 +15,17 @@ from chromadb.utils.embedding_functions import (
 )
 
 
-
 class DBConfig(BaseModel):
     name: str
     path: str
     collection_name: str
     emb_name: str
 
+
 class DBSUPPORTED(Enum):
     CHROMA = 0
     QDRANT = 1
+
 
 class EMBSUPPORTED(Enum):
     DEFAULT = 0
@@ -32,31 +33,26 @@ class EMBSUPPORTED(Enum):
 
 
 class OpenAIEmbeddingFunction(EmbeddingFunction):
-    
     def __init__(self):
         self._client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
         self._dimension = 64
-    
+
     def __call__(self, input: Documents) -> Embeddings:
-        embeddings = self._client.embeddings.create(input=input, model="text-embedding-3-small", 
-            dimensions=self._dimension).data
+        embeddings = self._client.embeddings.create(
+            input=input, model="text-embedding-3-small", dimensions=self._dimension
+        ).data
         # Sort resulting embeddings by index
         sorted_embeddings = sorted(embeddings, key=lambda e: e.index)
 
         # Return just the embeddings
-        return cast(
-            Embeddings, [result.embedding for result in sorted_embeddings]
-        )
+        return cast(Embeddings, [result.embedding for result in sorted_embeddings])
 
     @property
     def dimension(self):
         return self._dimension
-        
-        
 
 
 class VectorDB:
-
     def __init__(self, config: DBConfig):
         self._config = config
         self._is_chroma_db = self._config.name == DBSUPPORTED.CHROMA.name
@@ -66,34 +62,47 @@ class VectorDB:
         if self._is_qdrant_db:
             assert self._emb_func is not None, "Require a valid emb func for Qdrant DB."
         self._make_collection_instance()
-    
+
     def _get_emb_func(self) -> Optional[Any]:
         if self._config.emb_name == EMBSUPPORTED.OPENAI.name:
             return OpenAIEmbeddingFunction()
 
     def _make_collection_instance(self):
         if self._is_chroma_db:
-            self._client = chromadb.PersistentClient(path=self._config.path, )
-            self._chroma_collection = self._client.get_or_create_collection(self._collection_name,
-                    embedding_function=self._emb_func if self._emb_func is not None else DefaultEmbeddingFunction())
+            self._client = chromadb.PersistentClient(
+                path=self._config.path,
+            )
+            self._chroma_collection = self._client.get_or_create_collection(
+                self._collection_name,
+                embedding_function=self._emb_func
+                if self._emb_func is not None
+                else DefaultEmbeddingFunction(),
+            )
         elif self._is_qdrant_db:
             self._client = QdrantClient(
-                url=self._config.path, 
+                url=self._config.path,
                 api_key=os.environ.get("QDRANT_API_KEY", None),
             )
-            if not self._client.collection_exists(collection_name=self._collection_name):
-                self._client.create_collection(collection_name=self._collection_name,
-                    vectors_config=qdrant_models.VectorParams(size=self._emb_func.dimension, 
-                                                              distance=qdrant_models.Distance.COSINE))
+            if not self._client.collection_exists(
+                collection_name=self._collection_name
+            ):
+                self._client.create_collection(
+                    collection_name=self._collection_name,
+                    vectors_config=qdrant_models.VectorParams(
+                        size=self._emb_func.dimension,
+                        distance=qdrant_models.Distance.COSINE,
+                    ),
+                )
         else:
             raise ValueError(f"DB Type {self._config.name} not supported!")
-    
+
     @property
     def client(self):
         return self._client
-    
+
     def filter(self, kvs: Dict[str, str]) -> Optional[Any]:
         """Metadata / Payload filtering using kvs"""
+
         def _convert_to_chroma_op(results):
             ids = []
             metadatas = []
@@ -109,18 +118,9 @@ class VectorDB:
             }
 
         if self._is_chroma_db:
-            print(
-                {
-                    key : {
-                        "$eq": val
-                    } for key, val in kvs.items()
-                }
-            )
-            return self._chroma_collection.get(where={
-                    key : {
-                        "$eq": val
-                    } for key, val in kvs.items()
-                }
+            print({key: {"$eq": val} for key, val in kvs.items()})
+            return self._chroma_collection.get(
+                where={key: {"$eq": val} for key, val in kvs.items()}
             )
         elif self._is_qdrant_db:
             result = self.client.scroll(
@@ -130,16 +130,17 @@ class VectorDB:
                         qdrant_models.FieldCondition(
                             key=key,
                             match=qdrant_models.MatchValue(value=val),
-                        ) for key, val in kvs.items()
+                        )
+                        for key, val in kvs.items()
                     ]
                 ),
-                with_payload=True
+                with_payload=True,
             )[0]
             return _convert_to_chroma_op(result)
 
-    
     def search(self, query: List[Any], top_k: int) -> Optional[Any]:
         """Find nearest neighbors for a given list of query."""
+
         def _convert_to_chroma_op(results):
             ids = []
             distances = []
@@ -148,62 +149,81 @@ class VectorDB:
             for result in results:
                 ids.append([record.id for record in result[0]])
                 metadatas.append([record.payload for record in result[0]])
-                documents.append([record.payload.get("document", None) for record in result[0]])
+                documents.append(
+                    [record.payload.get("document", None) for record in result[0]]
+                )
                 distances.append(result[1])
             return {
                 "ids": ids,
                 "metadatas": metadatas,
                 "documents": documents,
-                "distances": distances
+                "distances": distances,
             }
 
         if self._is_chroma_db:
             return self._chroma_collection.query(
-                query_embeddings=query if all(isinstance(x, list) for x in query) and all(isinstance(x, float) for x in query[0]) else None,
+                query_embeddings=query
+                if all(isinstance(x, list) for x in query)
+                and all(isinstance(x, float) for x in query[0])
+                else None,
                 query_texts=query if all(isinstance(x, str) for x in query) else None,
-                n_results=top_k
+                n_results=top_k,
             )
         elif self._is_qdrant_db:
             # get embeddings if queries are strings.
-            if all(isinstance(x, list) for x in query) and all(isinstance(x, float) for x in query[0]):
+            if all(isinstance(x, list) for x in query) and all(
+                isinstance(x, float) for x in query[0]
+            ):
                 return self._client.search_batch(
-                    collection_name=self._collection_name, 
-                    requests=[qdrant_models.SearchRequest(vector=vec, limit=top_k) for vec in query])
+                    collection_name=self._collection_name,
+                    requests=[
+                        qdrant_models.SearchRequest(vector=vec, limit=top_k)
+                        for vec in query
+                    ],
+                )
             elif all(isinstance(x, str) for x in query):
                 query_emb = self._emb_func(query)
                 results = self._client.search_batch(
-                    collection_name=self._collection_name, 
-                    requests=[qdrant_models.SearchRequest(vector=vec, limit=top_k) for vec in query_emb])
+                    collection_name=self._collection_name,
+                    requests=[
+                        qdrant_models.SearchRequest(vector=vec, limit=top_k)
+                        for vec in query_emb
+                    ],
+                )
                 results_with_payload = []
                 for result in results:
                     ids = [point.id for point in result]
                     scores = [point.score for point in result]
-                    payloads = self._client.retrieve(collection_name=self._collection_name,
-                                                     ids=ids, with_payload=True)
-                    results_with_payload.append((payloads,scores))
-                return _convert_to_chroma_op(results_with_payload)                
-                
+                    payloads = self._client.retrieve(
+                        collection_name=self._collection_name,
+                        ids=ids,
+                        with_payload=True,
+                    )
+                    results_with_payload.append((payloads, scores))
+                return _convert_to_chroma_op(results_with_payload)
 
-
-    def add(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[Any]):
+    def add(
+        self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[Any]
+    ):
         """Batch upsert documents to the collection"""
         if self._is_chroma_db:
             return self._chroma_collection.add(
-                documents=documents,
-                metadatas=metadatas,
-                ids=list(map(str, ids))
+                documents=documents, metadatas=metadatas, ids=list(map(str, ids))
             )
-        elif self._is_qdrant_db:            
+        elif self._is_qdrant_db:
             self._client.upsert(
                 collection_name=self._collection_name,
                 points=qdrant_models.Batch(
-                    ids=[str(uuid.uuid5(uuid.NAMESPACE_DNS, str(x))) if not isinstance(x, int) else x for x in ids],
-                    payloads=[{**metadata, **{"document": document}} for metadata, document in zip(metadatas, documents)],
+                    ids=[
+                        str(uuid.uuid5(uuid.NAMESPACE_DNS, str(x)))
+                        if not isinstance(x, int)
+                        else x
+                        for x in ids
+                    ],
+                    payloads=[
+                        {**metadata, **{"document": document}}
+                        for metadata, document in zip(metadatas, documents)
+                    ],
                     vectors=self._emb_func(documents),
-                ))
-                
- 
-            
-
-
-
+                ),
+            )

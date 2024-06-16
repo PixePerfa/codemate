@@ -1,4 +1,3 @@
-import sys
 import os
 import shutil
 import re
@@ -780,13 +779,14 @@ class CodeAnalyzerTool(BaseToolSpec):
         )
 
 
-def create_agent():
+def create_agent(code_db_config: DBConfig, metadata_db_config: DBConfig):
     llm = OpenAI(temperature=0, model=globals.GPT_MODEL_NAME)
     github_tool_spec = GithubSearchTool()
-    code_analyzer_tool_spec = CodeAnalyzerTool()
+    code_analyzer_tool_spec = CodeAnalyzerTool(db_config=code_db_config)
+
     load_and_search_tool_spec = InternalDatabaseSearch(
-        metadata_db_path="./metadata_db",
-        codes_db_path="./code_db",
+        metadata_db_config=metadata_db_config,
+        code_db_config=code_db_config,
         github_access_token=GITHUB_TOKEN,
     )
     code_analyzer_agent = OpenAIAgent.from_tools(
@@ -906,9 +906,3 @@ def create_agent():
         """,
         max_function_calls=100,
     )
-
-
-if __name__ == "__main__":
-    query = sys.argv[1]
-    agent = create_agent()
-    print(agent.chat(query))

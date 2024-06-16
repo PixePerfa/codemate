@@ -2,6 +2,7 @@
 
 import chromadb
 import openai
+import uuid
 import os
 from typing import Dict, Any, List, Optional, cast
 from enum import Enum
@@ -34,7 +35,7 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
     
     def __init__(self):
         self._client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self._dimension = 128
+        self._dimension = 64
     
     def __call__(self, input: Documents) -> Embeddings:
         embeddings = self._client.embeddings.create(input=input, model="text-embedding-3-small", 
@@ -192,15 +193,15 @@ class VectorDB:
                 metadatas=metadatas,
                 ids=list(map(str, ids))
             )
-        elif self._is_qdrant_db:
-            self._client.upload_collection(
+        elif self._is_qdrant_db:            
+            self._client.upsert(
                 collection_name=self._collection_name,
-                ids=[hash(x) if not isinstance(x, int) else x for x in ids],
-                payload=[{**metadata, **{"document": document}} for metadata, document in zip(metadatas, documents)],
-                vectors=self._emb_func(documents),
-                parallel=4,
-                max_retries=3,
-            )
+                points=qdrant_models.Batch(
+                    ids=[str(uuid.uuid5(uuid.NAMESPACE_DNS, str(x))) if not isinstance(x, int) else x for x in ids],
+                    payloads=[{**metadata, **{"document": document}} for metadata, document in zip(metadatas, documents)],
+                    vectors=self._emb_func(documents),
+                ))
+                
  
             
 

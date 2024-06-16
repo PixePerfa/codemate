@@ -6,6 +6,9 @@ import shutil
 import re
 import json
 import instructor
+import requests
+import globals
+
 from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
 
@@ -53,161 +56,15 @@ from llama_index.core.callbacks.schema import (
 )
 from collections import defaultdict
 import logging
+import git_util
 
 from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 from external_data_loader import GithubDataLoader, GithubRepoItem
 from db_util import DBConfig, VectorDB
 
 
-INVALID_EXTENSIONS = [
-    ".xcconfig",
-    "macos",
-    ".xsl",
-    ".csv",
-    ".cmake",
-    ".h",
-    ".cc",
-    ".lock",
-    ".html",
-    ".txt",
-    ".pyi",
-    ".git",
-    ".gitignore",
-    ".swp",
-    ".swo",
-    ".pyc",
-    ".pyo",
-    ".class",
-    ".css",
-    ".rst",
-    ".dll",
-    ".exe",
-    ".jar",
-    ".o",
-    ".a",
-    ".min.js",
-    ".min.css",
-    ".egg",
-    ".war",
-    ".png",
-    ".tar.gz",
-    ".zip",
-    ".min.js.map",
-    ".min.css.map",
-    ".bundle.js",
-    ".bundle.css",
-    ".svelte",
-    ".jsx",
-    ".vue",
-    ".scss",
-    ".less",
-    ".sass",
-    ".min.html",
-    ".map",
-    ".svg",
-    ".woff",
-    ".woff2",
-    ".class",
-    ".jar",
-    ".war",
-    ".ear",
-    ".jad",
-    ".pyc",
-    ".pyo",
-    ".pyd",
-    ".egg-info",
-    ".dist-info",
-    ".pyz",
-    ".mod",
-    ".sum",
-    ".a",
-    ".jpeg",
-    ".json",
-    ".pptx",
-    ".xml",
-    ".jpg",
-    ".tiff",
-    ".pdf",
-    ".eml",
-    ".toml",
-    ".dockerignore",
-    ".txt",
-    ".slug",
-    ".apk",
-    ".dex",
-    ".so",
-    ".aar",
-    ".class",
-    ".jar",
-    ".war",
-    ".ear",
-    ".iml",
-    ".idea",
-    ".gradle",
-    ".buildcache",
-    ".externalNativeBuild",
-    ".cxx",
-    ".kts",
-    ".kotlin_module",
-    ".properties",
-    ".log",
-    ".npy",
-    ".tmp",
-    ".bak",
-    ".app",
-    ".ipa",
-    ".dSYM",
-    ".xcworkspace",
-    ".xcuserstate",
-    ".xccheckout",
-    ".xcscmblueprint",
-    ".xcuserdatad",
-    ".pbxproj",
-    ".mode1v3",
-    ".mode2v3",
-    ".perspectivev3",
-    ".xcuserstate",
-    ".xcuserdatad",
-    ".xcscmblueprint",
-    ".xccheckout",
-    ".xcodeproj",
-    ".xcassets",
-    ".storyboard",
-    ".strings",
-    ".plist",
-    ".entitlements",
-    ".mobileprovision",
-    ".lockfile",
-    ".xcuserstate",
-    ".xcuserdata",
-    ".log",
-    ".tmp",
-    ".bak",
-    ".xib",
-    ".pbxproj",
-    ".JPG",
-    ".poetry",
-    ".h5",
-    ".ipynb",
-    ".avi",
-    ".mp4",
-    ".pkl",
-    ".npy",
-    ".bin",
-    "BUILD",
-    "WORKSPACE",
-    "BUILD.bazel",
-    "Makefile",
-    ".index",
-    ".PNG",
-    ".png",
-    ".msg",
-    ".ipynb_checkpoints",
-    ".gitignore",
-    ".DS_Store",
-    ".gif"
-]
-
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', None)
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', None)
 
 
 LANG_EXTENSIONS_DICT = {
@@ -229,8 +86,11 @@ LANG_EXTENSIONS_DICT = {
     "haskell": [".hs"]
 }
 
+INVALID_FOLDERS = ['test', 'legacy', '.github', 'mock']
 
-
+class AgentResponse(BaseModel):
+    message: Any
+    content: Any
 
 
 def tool_map_to_markdown(tool_map: Dict[str, Any], depth: int, max_depth: int) -> str:
@@ -249,43 +109,6 @@ def tool_map_to_markdown(tool_map: Dict[str, Any], depth: int, max_depth: int) -
 
     return markdown
 
-def clone_repo(github_url, github_access_token):
-    """
-      Clone the GitHub repository to a local directory
-    """
-    g = Github(github_access_token) if github_access_token else Github()
-    def extract_repo_name(github_url):
-        path = urlparse(github_url).path
-        repo_name = path.split('/')[-1]
-        if repo_name.endswith('.git'):
-            repo_name = repo_name[:-4]
-        return repo_name
-
-
-    def extract_repo_details(url):
-        path = urlparse(url).path.lstrip('/')
-        repo_owner, repo_name = path.split('/')
-        repo_name = repo_name.rstrip('.git')
-        return repo_owner, repo_name
-    repo_owner, repo_name = extract_repo_details(github_url)
-    local_dir = f"./{extract_repo_name(github_url)}"
-    if os.path.exists(local_dir):
-        shutil.rmtree(local_dir)
-        print(f"Directory '{local_dir}' deleted.")
-
-    try:
-        repo = g.get_repo(f"{repo_owner}/{repo_name}")
-        default_branch = repo.default_branch
-    except Exception as e:
-        default_branch = "main"
-
-    try:
-        Repo.clone_from(github_url, local_dir)
-    except Exception as e:
-        print(f"Directory {local_dir} is not empty.")
-
-    return local_dir, default_branch, None
-
 
 
 def chunk_repo(github_item: GithubRepoItem, github_access_token):
@@ -298,7 +121,7 @@ def chunk_repo(github_item: GithubRepoItem, github_access_token):
     if not lang_extensions:
         return None, None
     try:
-        local_dir, _, _ = clone_repo(repo_url, github_access_token)
+        local_dir, _, _ = git_util.clone_repo(repo_url, github_access_token)
     except Exception as e:
         return []
     valid_files = []
@@ -309,7 +132,7 @@ def chunk_repo(github_item: GithubRepoItem, github_access_token):
                 continue
             full_path = os.path.join(dirpath, file)
             # ignore folders belonging to tests, legacy
-            if 'test' in full_path or 'legacy' in full_path or '.github' in full_path or 'mock' in full_path:
+            if any(x in full_path for x in INVALID_FOLDERS):
                 continue
             valid_files.append(Path(full_path))
     
@@ -328,253 +151,6 @@ def chunk_repo(github_item: GithubRepoItem, github_access_token):
     shutil.rmtree(local_dir)
     return nodes, documents
 
-
-class AgentResponse(BaseModel):
-    message: Any
-    content: Any
-
-class PythonicallyPrintingBaseHandler(BaseCallbackHandler):
-    """
-    Callback handler that prints logs in a Pythonic way. That is, not using `print` at all; use the logger instead.
-    See https://stackoverflow.com/a/6918596/1147061 for why you should prefer using a logger over `print`.
-
-    This class is meant to be subclassed, not used directly.
-
-    Using this class, your LlamaIndex Callback Handlers can now make use of vanilla Python logging handlers now.
-    One popular choice is https://rich.readthedocs.io/en/stable/logging.html#logging-handler.
-    """
-
-    def __init__(
-        self,
-        event_starts_to_ignore: Optional[List[CBEventType]] = None,
-        event_ends_to_ignore: Optional[List[CBEventType]] = None,
-        logger: Optional[logging.Logger] = None,
-    ) -> None:
-        self.logger: Optional[logging.Logger] = logger
-        super().__init__(
-            event_starts_to_ignore=event_starts_to_ignore,
-            event_ends_to_ignore=event_ends_to_ignore,
-        )
-
-    def _print(self, str) -> None:
-        if self.logger:
-            self.logger.debug(str)
-        else:
-            # This branch is to preserve existing behavior.
-            print(str, flush=True)
-
-class CustomCallbackHandler(PythonicallyPrintingBaseHandler):
-    """Callback handler that keeps track of debug info.
-
-    NOTE: this is a beta feature. The usage within our codebase, and the interface
-    may change.
-
-    This handler simply keeps track of event starts/ends, separated by event types.
-    You can use this callback handler to keep track of and debug events.
-
-    Args:
-        event_starts_to_ignore (Optional[List[CBEventType]]): list of event types to
-            ignore when tracking event starts.
-        event_ends_to_ignore (Optional[List[CBEventType]]): list of event types to
-            ignore when tracking event ends.
-
-    """
-
-    def __init__(
-        self,
-        event_starts_to_ignore: Optional[List[CBEventType]] = None,
-        event_ends_to_ignore: Optional[List[CBEventType]] = None,
-        print_trace_on_end: bool = True,
-        logger: Optional[logging.Logger] = None,
-    ) -> None:
-        """Initialize the llama debug handler."""
-        self._event_pairs_by_type: Dict[CBEventType, List[CBEvent]] = defaultdict(list)
-        self._event_pairs_by_id: Dict[str, List[CBEvent]] = defaultdict(list)
-        self._sequential_events: List[CBEvent] = []
-        self._cur_trace_id: Optional[str] = None
-        self._trace_map: Dict[str, List[str]] = defaultdict(list)
-        self.print_trace_on_end = print_trace_on_end
-        event_starts_to_ignore = (
-            event_starts_to_ignore if event_starts_to_ignore else []
-        )
-        event_ends_to_ignore = event_ends_to_ignore if event_ends_to_ignore else []
-        super().__init__(
-            event_starts_to_ignore=event_starts_to_ignore,
-            event_ends_to_ignore=event_ends_to_ignore,
-            logger=logger,
-        )
-
-    def on_event_start(
-        self,
-        event_type: CBEventType,
-        payload: Optional[Dict[str, Any]] = None,
-        event_id: str = "",
-        parent_id: str = "",
-        **kwargs: Any,
-    ) -> str:
-        """Store event start data by event type.
-
-        Args:
-            event_type (CBEventType): event type to store.
-            payload (Optional[Dict[str, Any]]): payload to store.
-            event_id (str): event id to store.
-            parent_id (str): parent event id.
-
-        """
-        event = CBEvent(event_type, payload=payload, id_=event_id)
-        for payload_type in event.payload:
-            if payload_type == EventPayload.TOOL:
-                debug_tool = (event.payload[payload_type].to_openai_tool())
-                if debug_tool["function"]["name"] == "load":
-                    print(f"Loading github repos....")
-                elif debug_tool["function"]["name"] == "compare":
-                    print("Comparing github repos!!!")
-                
-        self._event_pairs_by_type[event.event_type].append(event)
-        self._event_pairs_by_id[event.id_].append(event)
-        self._sequential_events.append(event)
-        return event.id_
-
-    def on_event_end(
-        self,
-        event_type: CBEventType,
-        payload: Optional[Dict[str, Any]] = None,
-        event_id: str = "",
-        **kwargs: Any,
-    ) -> None:
-        """Store event end data by event type.
-
-        Args:
-            event_type (CBEventType): event type to store.
-            payload (Optional[Dict[str, Any]]): payload to store.
-            event_id (str): event id to store.
-
-        """
-        event = CBEvent(event_type, payload=payload, id_=event_id)
-        for payload in event.payload:
-            if payload == EventPayload.FUNCTION_OUTPUT:
-                if "Error:" in event.payload[payload]:
-                    continue
-                print (event.payload[payload])
-
-        self._event_pairs_by_type[event.event_type].append(event)
-        self._event_pairs_by_id[event.id_].append(event)
-        self._sequential_events.append(event)
-        self._trace_map = defaultdict(list)
-
-    def get_events(self, event_type: Optional[CBEventType] = None) -> List[CBEvent]:
-        """Get all events for a specific event type."""
-        if event_type is not None:
-            return self._event_pairs_by_type[event_type]
-
-        return self._sequential_events
-
-    def _get_event_pairs(self, events: List[CBEvent]) -> List[List[CBEvent]]:
-        """Helper function to pair events according to their ID."""
-        event_pairs: Dict[str, List[CBEvent]] = defaultdict(list)
-        for event in events:
-            event_pairs[event.id_].append(event)
-
-        return sorted(
-            event_pairs.values(),
-            key=lambda x: datetime.strptime(x[0].time, TIMESTAMP_FORMAT),
-        )
-
-    def _get_time_stats_from_event_pairs(
-        self, event_pairs: List[List[CBEvent]]
-    ) -> EventStats:
-        """Calculate time-based stats for a set of event pairs."""
-        total_secs = 0.0
-        for event_pair in event_pairs:
-            start_time = datetime.strptime(event_pair[0].time, TIMESTAMP_FORMAT)
-            end_time = datetime.strptime(event_pair[-1].time, TIMESTAMP_FORMAT)
-            total_secs += (end_time - start_time).total_seconds()
-
-        return EventStats(
-            total_secs=total_secs,
-            average_secs=total_secs / len(event_pairs),
-            total_count=len(event_pairs),
-        )
-
-    def get_event_pairs(
-        self, event_type: Optional[CBEventType] = None
-    ) -> List[List[CBEvent]]:
-        """Pair events by ID, either all events or a specific type."""
-        if event_type is not None:
-            return self._get_event_pairs(self._event_pairs_by_type[event_type])
-
-        return self._get_event_pairs(self._sequential_events)
-
-    def get_llm_inputs_outputs(self) -> List[List[CBEvent]]:
-        """Get the exact LLM inputs and outputs."""
-        return self._get_event_pairs(self._event_pairs_by_type[CBEventType.LLM])
-
-    def get_event_time_info(
-        self, event_type: Optional[CBEventType] = None
-    ) -> EventStats:
-        event_pairs = self.get_event_pairs(event_type)
-        return self._get_time_stats_from_event_pairs(event_pairs)
-
-    def flush_event_logs(self) -> None:
-        """Clear all events from memory."""
-        self._event_pairs_by_type = defaultdict(list)
-        self._event_pairs_by_id = defaultdict(list)
-        self._sequential_events = []
-
-    def start_trace(self, trace_id: Optional[str] = None) -> None:
-        """Launch a trace."""
-        self._trace_map = defaultdict(list)
-        self._cur_trace_id = trace_id
-
-    def end_trace(
-        self,
-        trace_id: Optional[str] = None,
-        trace_map: Optional[Dict[str, List[str]]] = None,
-    ) -> None:
-        """Shutdown the current trace."""
-        self._trace_map = trace_map or defaultdict(list)
-        if self.print_trace_on_end:
-            self.print_trace_map()
-
-    def _print_trace_map(self, cur_event_id: str, level: int = 0) -> None:
-        """Recursively print trace map to terminal for debugging."""
-        event_pair = self._event_pairs_by_id[cur_event_id]
-        if event_pair:
-            time_stats = self._get_time_stats_from_event_pairs([event_pair])
-            indent = " " * level * 2
-            self._print(
-                f"{indent}|_{event_pair[0].event_type} -> {time_stats.total_secs} seconds",
-            )
-
-        child_event_ids = self._trace_map[cur_event_id]
-        for child_event_id in child_event_ids:
-            self._print_trace_map(child_event_id, level=level + 1)
-
-    def print_trace_map(self) -> None:
-        """Print simple trace map to terminal for debugging of the most recent trace."""
-        self._print("*" * 10)
-        self._print(f"Trace: {self._cur_trace_id}")
-        self._print_trace_map(BASE_TRACE_EVENT, level=1)
-        self._print("*" * 10)
-    
-    def _print(self, str) -> None:
-        if self.logger:
-            self.logger.debug(str)
-        else:
-            # This branch is to preserve existing behavior.
-            print(str, flush=True)
-
-    @property
-    def event_pairs_by_type(self) -> Dict[CBEventType, List[CBEvent]]:
-        return self._event_pairs_by_type
-
-    @property
-    def events_pairs_by_id(self) -> Dict[str, List[CBEvent]]:
-        return self._event_pairs_by_id
-
-    @property
-    def sequential_events(self) -> List[CBEvent]:
-        return self._sequential_events
 
 
 class GithubSearchTool(BaseToolSpec):
@@ -919,7 +495,7 @@ class CodeAnalyzerTool(BaseToolSpec):
     ]
     def __init__(self, db_config: DBConfig):
         self._agents = {}
-        self.llm = OpenAI(temperature=0, model_name=GPT_MODEL_NAME, api_key=OPENAI_API_KEY)
+        self.llm = OpenAI(temperature=0, model_name=globals.GPT_MODEL_NAME, api_key=OPENAI_API_KEY)
         self.code_db = VectorDB(db_config)
     
     @classmethod
@@ -930,7 +506,6 @@ class CodeAnalyzerTool(BaseToolSpec):
         name = match.group(1)
         name = name.replace('.git', '')
         url = f"https://api.github.com/search/repositories?q={name}"
-        import requests
         func = getattr(requests, "get")
         response = func(url, headers={}, timeout=50)
         if response.status_code != 200:
@@ -1134,9 +709,7 @@ class CodeAnalyzerTool(BaseToolSpec):
 
 
 def create_agent():
-    llm = OpenAI(temperature=0, model=GPT_MODEL_NAME)
-    llama_debug = CustomCallbackHandler(print_trace_on_end=False)
-    callback_manager = CallbackManager([llama_debug])
+    llm = OpenAI(temperature=0, model=globals.GPT_MODEL_NAME)
     github_tool_spec = GithubSearchTool()
     code_analyzer_tool_spec = CodeAnalyzerTool()
     load_and_search_tool_spec = InternalDatabaseSearch(metadata_db_path="./metadata_db", 
@@ -1238,7 +811,6 @@ def create_agent():
         3) If the query is related to a github repo but it is not evident, check with user if they want to provide the github repo or search externally on github.
         4) Think carefully and understand what query the user is asked about a particular github repo or trying to ask for comparison.
         """,
-        callback_manager=callback_manager,
         max_function_calls=100
     )
 

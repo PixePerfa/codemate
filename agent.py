@@ -6,8 +6,10 @@ import json
 import instructor
 import requests
 import globals
+import git_util
 
-
+from typing import Dict, Any, List, Optional
+from pathlib import Path
 from langsmith import traceable
 from llama_index.core.llms import ChatMessage
 from pydantic.main import BaseModel
@@ -19,16 +21,11 @@ from llama_index.core.base.response.schema import Response
 
 from llama_index.agent.openai import OpenAIAgent
 from llama_index.core.schema import Document
-from typing import Dict, Any, List, Optional
-from pathlib import Path
 from llama_index.packs.code_hierarchy import (
     CodeHierarchyNodeParser,
 )
 from llama_index.packs.code_hierarchy import CodeHierarchyKeywordQueryEngine
-
 from llama_index.core.readers.file.base import SimpleDirectoryReader
-import git_util
-
 from external_data_loader import GithubDataLoader, GithubRepoItem
 from db_util import DBConfig, VectorDB
 

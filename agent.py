@@ -7,6 +7,7 @@ import instructor
 import requests
 import globals
 import git_util
+import openai
 
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -32,7 +33,7 @@ from db_util import DBConfig, VectorDB
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", None)
-
+openai.api_key = OPENAI_API_KEY
 
 LANG_EXTENSIONS_DICT = {
     "python": [".py"],

@@ -10,7 +10,6 @@ import openai
 
 from typing import Dict, Any, List, Optional
 from pathlib import Path
-from langsmith import traceable
 from llama_index.core.llms import ChatMessage
 from pydantic.main import BaseModel
 from llama_index.core.tools.query_engine import QueryEngineTool
@@ -650,7 +649,6 @@ class CodeAnalyzerTool(BaseToolSpec):
             content=None,
         )
 
-    @traceable
     def chat(self, repo_url: str, query: str) -> AgentResponse:
         """
         Given a repo_url answer the query by chatting with an agent for that repo.

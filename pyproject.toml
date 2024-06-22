@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "codemate"
+version = "0.1.0"
+description = ""
+authors = ["Ishan <345ishaan@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+ghapi = "^1.0.5"
+gitpython = "^3.1.43"
+openai = "^1.35.3"
+numpy = "^1.26.4"
+urllib3 = "^2.2.2"
+tenacity = "^8.4.1"
+requests = "^2.31.0"
+chromadb = "^0.5.3"
+llama-index = "^0.10.48.post1"
+llama-index-packs-code-hierarchy = "^0.1.5"
+arxiv = "^2.1.0"
+parsel = "^1.9.1"
+translate = "^3.6.1"
+youtube-search = "^2.1.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

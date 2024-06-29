@@ -4,6 +4,7 @@ import functools
 import arxiv
 import datetime
 
+from rich import print
 from parsel import Selector
 from typing import List, Literal
 from pydantic import BaseModel
@@ -19,6 +20,15 @@ class GithubRepoItem(BaseModel):
     owner: str
     stars: int
     forks: int
+
+
+class GithubIssueItem(BaseModel):
+    title: str
+    labels: List[str]
+    created_at: str
+    updated_at: str
+    closed_at: str
+    description: str
 
 
 class GithubDataLoader:
@@ -221,6 +231,29 @@ class GithubDataLoader:
             items = items[:top_k]
         return items
 
+    def load_issue(
+        self, name: str, owner: str, issue_number: int, **kwargs
+    ) -> GithubIssueItem:
+        url = f"{self.BASE_GITHUB_API_URL}/repos/{owner}/{name}/issues/{issue_number}"
+        func = getattr(requests, "get")
+        headers = kwargs.pop("headers", {})
+
+        response = func(url, headers=headers, timeout=60, **kwargs)
+        if response.status_code != 200:
+            assert f"Unable to retrieve {url}"
+        response = response.json()
+        labels = response.get("labels", [])
+        labels = list(labels) if isinstance(labels, dict) else labels
+
+        return GithubIssueItem(
+            title=response.get("title", ""),
+            labels=[label.get("name", "") for label in labels],
+            created_at=response.get("created_at", ""),
+            updated_at=response.get("updated_at", ""),
+            closed_at=response.get("closed_at", ""),
+            description=response.get("body", ""),
+        )
+
 
 class ArxivPaperItem(BaseModel):
     published: str
@@ -366,4 +399,8 @@ class YoutubeDataLoader:
 
 if __name__ == "__main__":
     github_loader = GithubDataLoader()
-    print(github_loader.mock())
+    print(
+        github_loader.load_issue(
+            name="sympy", owner="sympy", issue_number=26134
+        ).description
+    )

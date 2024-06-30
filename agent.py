@@ -25,28 +25,6 @@ from external_data_loader import GithubDataLoader, GithubRepoItem
 from db_util import DBConfig, VectorDB
 
 
-LANG_EXTENSIONS_DICT = {
-    "python": [".py"],
-    "javascript": [".js"],
-    "java": [".java"],
-    "c": [".c"],
-    "cpp": [".cpp", ".cc", ".cxx"],  # Including common C++ file extensions
-    "csharp": [".cs"],
-    "go": [".go"],
-    "ruby": [".rb"],
-    "swift": [".swift"],
-    "php": [".php"],
-    "typescript": [".ts"],
-    "kotlin": [".kt"],
-    "rust": [".rs"],
-    "scala": [".scala"],
-    "perl": [".pl"],
-    "haskell": [".hs"],
-}
-
-INVALID_FOLDERS = ["test", "legacy", ".github", "mock"]
-
-
 class AgentResponse(BaseModel):
     message: Any
     content: Any

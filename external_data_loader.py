@@ -156,13 +156,14 @@ class GithubDataLoader:
                 ):
                     continue
                 desc = "".join(item["description"]).strip()
+                name, owner = repo.split("/")[-1], repo.split("/")[-2]
                 items.append(
                     GithubRepoItem(
                         repo_url=repo,
                         desc=desc,
                         lang=item["language"],
-                        name=item["full_name"],
-                        owner=item["owner"]["login"],
+                        name=name,
+                        owner=owner,
                         stars=item["stargazers_count"],
                         forks=item.get("forks_count", 0),
                     )
@@ -212,13 +213,14 @@ class GithubDataLoader:
                     trans_desc = self.ENG_TRANSLATOR.translate(orig_desc)
                 else:
                     trans_desc = orig_desc
+                name, owner = repo.split("/")[-1], repo.split("/")[-2]
                 items.append(
                     GithubRepoItem(
                         repo_url=repo,
                         desc=trans_desc,
                         lang=item["language"],
-                        name=item["full_name"],
-                        owner=item["owner"]["login"],
+                        name=name,
+                        owner=owner,
                         stars=item["stargazers_count"],
                         forks=item.get("forks_count", 0),
                     )

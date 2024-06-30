@@ -25,10 +25,6 @@ from external_data_loader import GithubDataLoader, GithubRepoItem
 from db_util import DBConfig, VectorDB
 
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", None)
-openai.api_key = OPENAI_API_KEY
-
 LANG_EXTENSIONS_DICT = {
     "python": [".py"],
     "javascript": [".js"],
@@ -78,6 +74,7 @@ def tool_map_to_markdown(tool_map: Dict[str, Any], depth: int, max_depth: int) -
 def chunk_repo(github_item: GithubRepoItem, github_access_token):
     repo_lang = github_item.lang
     github_loader = GithubDataLoader(github_api_key=github_access_token)
+
     documents = github_loader.load_repo(owner=github_item.owner, repo=github_item.name)
     nodes = CodeHierarchyNodeParser(
         language=repo_lang,
@@ -99,6 +96,10 @@ class GithubSearchTool(BaseToolSpec):
         "find_trending_github_repos",
         "find_relevant_repos",
     ]
+
+    def __init__(self):
+        self._github_api_key = os.environ.get("GITHUB_TOKEN", None)
+        assert self._github_api_key is not None
 
     def generate_topics_from_query(self, query: str):
         # Transform embedding to search a DB storing github repo-descriptions.
@@ -202,7 +203,9 @@ class GithubSearchTool(BaseToolSpec):
             query: If provided, then filters the trending repos which have description most similar
                 to the query, otherwise returns all the trending repos currently.
         """
-        items = GithubDataLoader().get_trending_repos(since="daily", top_k=50)
+        items = GithubDataLoader(self._github_api_key).get_trending_repos(
+            since="daily", top_k=50
+        )
         if query is not None:
 
             class RelevantRepos(BaseModel):
@@ -230,7 +233,7 @@ class GithubSearchTool(BaseToolSpec):
 
         topics = self.generate_topics_from_query(query)
 
-        items = GithubDataLoader().search_repos_by_topic(
+        items = GithubDataLoader(self._github_api_key).search_repos_by_topic(
             topics=topics, min_stars=0, top_k=10
         )
         return AgentResponse(
@@ -253,13 +256,13 @@ class InternalDatabaseSearch(BaseToolSpec):
         self,
         metadata_db_config: DBConfig,
         code_db_config: DBConfig,
-        github_access_token: str,
     ):
         self.client = instructor.from_openai(OG_OpenAI())
 
         self.metadata_db = VectorDB(metadata_db_config)
         self.code_db = VectorDB(code_db_config)
-        self.github_access_token = github_access_token
+        self.github_access_token = os.environ.get("GITHUB_TOKEN", None)
+        assert self.github_access_token is not None
 
     def retrieve_relevant_repos(self, query: str, top_k: int = 5) -> AgentResponse:
         """Retrieve top k relevant code repos given the query."""
@@ -391,9 +394,9 @@ class InternalDatabaseSearch(BaseToolSpec):
                 match = re.search(r"github\.com/([^/]+/[^/]+)", github_url)
                 if not match:
                     continue
-                github_item = GithubDataLoader().search_repos_by_name([match.group(1)])[
-                    0
-                ]
+                github_item = GithubDataLoader(
+                    github_api_key=self.github_access_token
+                ).search_repos_by_name([match.group(1)])[0]
                 nodes, code_documents = chunk_repo(
                     github_item, self.github_access_token
                 )
@@ -492,8 +495,13 @@ class CodeAnalyzerTool(BaseToolSpec):
 
     def __init__(self, db_config: DBConfig):
         self._agents = {}
+        self._openai_api_key = os.environ.get("OPENAI_API_KEY", None)
+        assert self._openai_api_key is not None
+        openai.api_key = self._openai_api_key
         self.llm = OpenAI(
-            temperature=0, model_name=globals.GPT_MODEL_NAME, api_key=OPENAI_API_KEY
+            temperature=0,
+            model_name=globals.GPT_MODEL_NAME,
+            api_key=self._openai_api_key,
         )
         self.code_db = VectorDB(db_config)
 
@@ -748,14 +756,16 @@ class CodeAnalyzerTool(BaseToolSpec):
 
 
 def create_agent(code_db_config: DBConfig, metadata_db_config: DBConfig):
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
+    assert OPENAI_API_KEY is not None
+    openai.api_key = OPENAI_API_KEY
     llm = OpenAI(temperature=0, model=globals.GPT_MODEL_NAME)
+
     github_tool_spec = GithubSearchTool()
     code_analyzer_tool_spec = CodeAnalyzerTool(db_config=code_db_config)
 
     load_and_search_tool_spec = InternalDatabaseSearch(
-        metadata_db_config=metadata_db_config,
-        code_db_config=code_db_config,
-        github_access_token=GITHUB_TOKEN,
+        metadata_db_config=metadata_db_config, code_db_config=code_db_config
     )
     code_analyzer_agent = OpenAIAgent.from_tools(
         code_analyzer_tool_spec.to_tool_list(),

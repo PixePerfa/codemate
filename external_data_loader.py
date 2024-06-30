@@ -23,16 +23,17 @@ class GithubRepoItem(BaseModel):
     owner: str
     stars: int
     forks: int
+    commit_sha: str = None
 
 
 class GithubIssueItem(BaseModel):
+    repo_item: GithubRepoItem
     title: str
     labels: List[str]
     created_at: str
     updated_at: str
     closed_at: str
     description: str
-    base_commit: str
 
 
 class GithubDataLoader:
@@ -89,7 +90,7 @@ class GithubDataLoader:
     ) -> List[Document]:
         github_client = GithubClient(github_token=self._github_api_key, verbose=True)
         # find the language of the repository and only load the files having extensions from that language.
-        repo_item = self.search_repos_by_name(repo_names=[repo])
+        repo_item = self.search_repos_by_name(repo_names=[f"{owner}/{repo}"])
         assert repo_item
         repo_item = repo_item[0]
         repo_lang = repo_item.lang.lower()
@@ -313,6 +314,10 @@ class GithubDataLoader:
     def load_issue(
         self, name: str, owner: str, issue_number: int, **kwargs
     ) -> GithubIssueItem:
+        repo_item = self.search_repos_by_name(repo_names=[f"{owner}/{name}"])
+        assert repo_item
+        repo_item = repo_item[0]
+
         url = f"{self.BASE_GITHUB_API_URL}/repos/{owner}/{name}/issues/{issue_number}"
         func = getattr(requests, "get")
         headers = kwargs.pop("headers", {})
@@ -341,15 +346,16 @@ class GithubDataLoader:
         assert commit_response.status_code == 200
         commit_history = commit_response.json()
         assert commit_history
+        repo_item.commit_sha = commit_history[0]["sha"]
 
         return GithubIssueItem(
+            repo_item=repo_item,
             title=response.get("title", ""),
             labels=[label.get("name", "") for label in labels],
             created_at=response.get("created_at", ""),
             updated_at=response.get("updated_at", ""),
             closed_at=response.get("closed_at", ""),
             description=response.get("body", ""),
-            base_commit=commit_history[0]["sha"],
         )
 
 

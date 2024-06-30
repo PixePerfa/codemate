@@ -51,9 +51,18 @@ def tool_map_to_markdown(tool_map: Dict[str, Any], depth: int, max_depth: int) -
 
 def chunk_repo(github_item: GithubRepoItem, github_access_token):
     repo_lang = github_item.lang
+
     github_loader = GithubDataLoader(github_api_key=github_access_token)
 
-    documents = github_loader.load_repo(owner=github_item.owner, repo=github_item.name)
+    print(
+        f"Loading repo {github_item.owner}:{github_item.name}:{github_item.commit_sha}"
+    )
+
+    documents = github_loader.load_repo(
+        owner=github_item.owner,
+        repo=github_item.name,
+        commit_sha=github_item.commit_sha,
+    )
     nodes = CodeHierarchyNodeParser(
         language=repo_lang,
         # You can further parameterize the CodeSplitter to split the code
@@ -73,6 +82,7 @@ class GithubSearchTool(BaseToolSpec):
     spec_functions = [
         "find_trending_github_repos",
         "find_relevant_repos",
+        "get_github_issue_repo_item",
     ]
 
     def __init__(self):
@@ -222,6 +232,35 @@ class GithubSearchTool(BaseToolSpec):
             content=items,
         )
 
+    def get_github_issue_repo_item(self, issue_url: str) -> AgentResponse:
+        """Given a github issue URL, creates a GithubIssueItem which stores all the relevant information
+        needed to solve the issue. Also stores the GithubRepoItem storing the commit_sha which needs to
+        be used to solve it.
+
+        Example issue_url: https://github.com/sympy/sympy/issues/26134
+        """
+        regex = re.compile(r"https://github\.com/([^/]+)/([^/]+)/issues/(\d+)")
+        match = regex.match(issue_url)
+        if not match:
+            return AgentResponse(
+                message=f"""
+                Invalid issue url sent:{issue_url}
+                Check out an example of valid issue URL here: https://github.com/sympy/sympy/issues/26134
+                """,
+                content=None,
+            )
+        owner, repo, issue_number = match.groups()
+        issue_item = GithubDataLoader(self._github_api_key).load_issue(
+            name=repo, owner=owner, issue_number=int(issue_number)
+        )
+        return AgentResponse(
+            message="""
+                GithubIssueItem storing the all relevant information needed to solve the issue and GithubRepoItem
+                which stores the base_commit which needs to be checked out to solve it.
+                """,
+            content=issue_item,
+        )
+
 
 class InternalDatabaseSearch(BaseToolSpec):
     """
@@ -352,14 +391,18 @@ class InternalDatabaseSearch(BaseToolSpec):
         )
         return response.summary
 
-    def add_github_repos(self, github_urls: List[str]) -> AgentResponse:
-        """Updates the internal database if any github url in the provided list is not present."""
+    def add_github_repos(self, repo_items: List[GithubRepoItem]) -> AgentResponse:
+        """Upserts the internal database if any github repo item is absent."""
         added_items = []
         present_items = []
 
-        for github_url in github_urls:
-            metadata_nodes = self.metadata_db.filter({"repo_url": github_url})
-            code_nodes = self.code_db.filter({"repo_url": github_url})
+        for item in repo_items:
+            filter_query = {"repo_url": item.repo_url}
+            if item.commit_sha:
+                filter_query.update({"commit_sha": item.commit_sha})
+
+            metadata_nodes = self.metadata_db.filter(filter_query)
+            code_nodes = self.code_db.filter(filter_query)
 
             if len(metadata_nodes["metadatas"]) and len(code_nodes["metadatas"]):
                 del code_nodes
@@ -369,15 +412,7 @@ class InternalDatabaseSearch(BaseToolSpec):
                         {"summary": metadata_nodes["documents"][i]}
                     )
             else:
-                match = re.search(r"github\.com/([^/]+/[^/]+)", github_url)
-                if not match:
-                    continue
-                github_item = GithubDataLoader(
-                    github_api_key=self.github_access_token
-                ).search_repos_by_name([match.group(1)])[0]
-                nodes, code_documents = chunk_repo(
-                    github_item, self.github_access_token
-                )
+                nodes, code_documents = chunk_repo(item, self.github_access_token)
                 tool_map_dict = CodeHierarchyNodeParser.get_code_hierarchy_from_nodes(
                     nodes, max_depth=0
                 )[0]
@@ -393,13 +428,13 @@ class InternalDatabaseSearch(BaseToolSpec):
 
                     Repository Details:
 
-                    URL: {github_item.repo_url}
-                    Descripption: {github_item.desc}
-                    Language: {github_item.lang}
-                    Name: {github_item.name}
-                    Owner: {github_item.owner}
-                    Stars: {github_item.stars}
-                    Forks: {github_item.forks}
+                    URL: {item.repo_url}
+                    Descripption: {item.desc}
+                    Language: {item.lang}
+                    Name: {item.name}
+                    Owner: {item.owner}
+                    Stars: {item.stars}
+                    Forks: {item.forks}
 
                     Here is how the repository structure looks like with folder, module names present etc.
 
@@ -413,10 +448,18 @@ class InternalDatabaseSearch(BaseToolSpec):
                         max_depth_to_consider -= 1
                     num_tries -= 1
                 assert summary is not None
+
+                # add commit to the ID to have separate snapshots of codebase if needed.
+                id_prefix = (
+                    item.repo_url + item.commit_sha
+                    if item.commit_sha
+                    else item.repo_url
+                )
+
                 self.metadata_db.add(
                     documents=[summary],
-                    metadatas=[github_item.dict()],
-                    ids=[github_url],
+                    metadatas=[item.dict()],
+                    ids=[id_prefix],
                 )
                 documents = [doc.text for doc in code_documents]
                 doc_metadata = [doc.dict() for doc in code_documents]
@@ -434,12 +477,12 @@ class InternalDatabaseSearch(BaseToolSpec):
                 self.code_db.add(
                     documents=documents,
                     ids=list(
-                        map(lambda x: f"{github_url}_{x}", range(len(code_documents)))
+                        map(lambda x: f"{id_prefix}_{x}", range(len(code_documents)))
                     ),
                     metadatas=list(
                         map(
                             lambda x: {
-                                **github_item.dict(),
+                                **item.dict(),
                                 "node_id": x,
                                 **doc_metadata[x],
                             },
@@ -447,7 +490,7 @@ class InternalDatabaseSearch(BaseToolSpec):
                         )
                     ),
                 )
-                added_items.append(github_item.dict())
+                added_items.append(item.dict())
                 added_items[-1].update({"summary": summary})
         if added_items:
             return AgentResponse(

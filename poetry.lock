@@ -1540,13 +1540,13 @@ query-tools = ["guidance (>=0.0.64,<0.0.65)", "jsonpath-ng (>=1.6.0,<2.0.0)", "l
 
 [[package]]
 name = "llama-index-llms-openai"
-version = "0.1.22"
+version = "0.1.24"
 description = "llama-index llms openai integration"
 optional = false
 python-versions = "<4.0,>=3.8.1"
 files = [
-    {file = "llama_index_llms_openai-0.1.22-py3-none-any.whl", hash = "sha256:84a8c910671460ad724ed818192f209f7481e71bcc6528553ba7e66db2e14bcd"},
-    {file = "llama_index_llms_openai-0.1.22.tar.gz", hash = "sha256:729bf2ea7043517465e1d585089512b77d8b3ce92233a67c138d5d621061ed56"},
+    {file = "llama_index_llms_openai-0.1.24-py3-none-any.whl", hash = "sha256:c7b71cd34765e2d080d5eaf23c602877cc74fea162b59d53965273b2d4c4a56a"},
+    {file = "llama_index_llms_openai-0.1.24.tar.gz", hash = "sha256:9031bd155c303f89cc51cfcc75d7d6f12fffa4274f2f9c7f67d4140350d13d56"},
 ]
 
 [package.dependencies]
@@ -1636,6 +1636,22 @@ striprtf = ">=0.0.26,<0.0.27"
 
 [package.extras]
 pymupdf = ["pymupdf (>=1.23.21,<2.0.0)"]
+
+[[package]]
+name = "llama-index-readers-github"
+version = "0.1.9"
+description = "llama-index readers github integration"
+optional = false
+python-versions = "<4.0,>=3.8.1"
+files = [
+    {file = "llama_index_readers_github-0.1.9-py3-none-any.whl", hash = "sha256:2ef032ea4097ab2f7a879be588818e14a01ebac951bec64da38fed0d247c6ba7"},
+    {file = "llama_index_readers_github-0.1.9.tar.gz", hash = "sha256:2b189fc84979775bd64648e70484a786d25eda68f7247b9b84f7a25be1110f9c"},
+]
+
+[package.dependencies]
+httpx = ">=0.26.0"
+llama-index-core = ">=0.10.1,<0.11.0"
+llama-index-readers-file = ">=0.1.1,<0.2.0"
 
 [[package]]
 name = "llama-index-readers-llama-parse"
@@ -4549,4 +4565,4 @@ test = ["big-O", "importlib-resources", "jaraco.functools", "jaraco.itertools", 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.12"
-content-hash = "92149d649246cb3f389356c12901e010c34de2f16d47014ed038a147993bd769"
+content-hash = "aa65972cdb39fb9b9655db259ea60d723fee206dd1bd3e7dbc2278373a69b9f0"

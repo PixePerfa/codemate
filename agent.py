@@ -1,15 +1,12 @@
 import os
-import shutil
 import re
 import json
 import instructor
 import requests
 import globals
-import git_util
 import openai
 
 from typing import Dict, Any, List, Optional
-from pathlib import Path
 from llama_index.core.llms import ChatMessage
 from pydantic.main import BaseModel
 from llama_index.core.tools.query_engine import QueryEngineTool
@@ -24,7 +21,6 @@ from llama_index.packs.code_hierarchy import (
     CodeHierarchyNodeParser,
 )
 from llama_index.packs.code_hierarchy import CodeHierarchyKeywordQueryEngine
-from llama_index.core.readers.file.base import SimpleDirectoryReader
 from external_data_loader import GithubDataLoader, GithubRepoItem
 from db_util import DBConfig, VectorDB
 
@@ -80,35 +76,9 @@ def tool_map_to_markdown(tool_map: Dict[str, Any], depth: int, max_depth: int) -
 
 
 def chunk_repo(github_item: GithubRepoItem, github_access_token):
-    repo_url = github_item.repo_url
     repo_lang = github_item.lang
-    assert repo_lang
-    repo_lang = repo_lang.lower()
-    repo_lang = repo_lang if repo_lang != "c++" else "cpp"
-    lang_extensions = LANG_EXTENSIONS_DICT.get(repo_lang, [])
-    if not lang_extensions:
-        return None, None
-    try:
-        local_dir, _, _ = git_util.clone_repo(repo_url, github_access_token)
-    except Exception:
-        return []
-    valid_files = []
-    for dirpath, _, filenames in os.walk(local_dir):
-        for file in filenames:
-            _, file_extension = os.path.splitext(file)
-            if file_extension.lower() not in lang_extensions:
-                continue
-            full_path = os.path.join(dirpath, file)
-            # ignore folders belonging to tests, legacy
-            if any(x in full_path for x in INVALID_FOLDERS):
-                continue
-            valid_files.append(Path(full_path))
-
-    documents = SimpleDirectoryReader(
-        input_files=valid_files,
-        file_metadata=lambda x: {"filepath": x},
-    ).load_data()
-
+    github_loader = GithubDataLoader(github_api_key=github_access_token)
+    documents = github_loader.load_repo(owner=github_item.owner, repo=github_item.name)
     nodes = CodeHierarchyNodeParser(
         language=repo_lang,
         # You can further parameterize the CodeSplitter to split the code
@@ -116,7 +86,7 @@ def chunk_repo(github_item: GithubRepoItem, github_access_token):
         # chunck_lines and max_chars parameters, here we just use the defaults
         # code_splitter=CodeSplitter(language="python"),
     ).get_nodes_from_documents(documents)
-    shutil.rmtree(local_dir)
+
     return nodes, documents
 
 

@@ -1,3 +1,4 @@
+import os
 import requests
 import re
 import functools
@@ -6,10 +7,12 @@ import datetime
 
 from rich import print
 from parsel import Selector
-from typing import List, Literal
+from typing import List, Literal, Optional
 from pydantic import BaseModel
 from translate import Translator
 from youtube_search import YoutubeSearch
+from llama_index.core import Document
+from llama_index.readers.github import GithubRepositoryReader, GithubClient
 
 
 class GithubRepoItem(BaseModel):
@@ -29,6 +32,7 @@ class GithubIssueItem(BaseModel):
     updated_at: str
     closed_at: str
     description: str
+    base_commit: str
 
 
 class GithubDataLoader:
@@ -36,6 +40,32 @@ class GithubDataLoader:
     BASE_GITHUB_API_URL = "https://api.github.com"
 
     ENG_TRANSLATOR = Translator(to_lang="en", from_lang="zh")
+
+    LANG_EXTENSIONS_DICT = {
+        "python": [".py"],
+        "javascript": [".js"],
+        "java": [".java"],
+        "c": [".c"],
+        "cpp": [".cpp", ".cc", ".cxx"],  # Including common C++ file extensions
+        "csharp": [".cs"],
+        "go": [".go"],
+        "ruby": [".rb"],
+        "swift": [".swift"],
+        "php": [".php"],
+        "typescript": [".ts"],
+        "kotlin": [".kt"],
+        "rust": [".rs"],
+        "scala": [".scala"],
+        "perl": [".pl"],
+        "haskell": [".hs"],
+    }
+
+    # folders in a repo to exclude while loading
+    INVALID_FOLDERS = ["legacy", ".", "mock"]
+
+    def __init__(self, github_api_key: str) -> None:
+        self._github_api_key = github_api_key
+        os.environ["GITHUB_TOKEN"] = self._github_api_key
 
     def mock(self):
         mock_list = [
@@ -48,6 +78,53 @@ class GithubDataLoader:
             "lucidrains/denoising-diffusion-pytorch",
         ]
         return self.search_repos_by_name(mock_list)
+
+    def load_repo(
+        self,
+        owner: str,
+        repo: str,
+        filter_by_lang: bool = True,
+        branch: Optional[str] = None,
+        commit_sha: Optional[str] = None,
+    ) -> List[Document]:
+        github_client = GithubClient(github_token=self._github_api_key, verbose=True)
+        # find the language of the repository and only load the files having extensions from that language.
+        repo_item = self.search_repos_by_name(repo_names=[repo])
+        assert repo_item
+        repo_item = repo_item[0]
+        repo_lang = repo_item.lang.lower()
+        repo_lang = repo_lang if repo_lang != "c++" else "cpp"
+        lang_extensions = self.LANG_EXTENSIONS_DICT.get(repo_lang, [])
+        filter_file_extensions = None
+        if filter_by_lang:
+            assert lang_extensions, f"Not able to find corresponding file extensioons for {repo}: {repo_lang}"
+            filter_file_extensions = (
+                lang_extensions,
+                GithubRepositoryReader.FilterType.INCLUDE,
+            )
+
+        if branch is None and commit_sha is None:
+            # find the default branch using github api.
+            request_url = f"{self.BASE_GITHUB_API_URL}/repos/{owner}/{repo}"
+
+            response = requests.get(request_url, headers={})
+            assert response.status_code == 200
+
+            # Get the default branch name
+            branch = response.json().get("default_branch")
+
+        return GithubRepositoryReader(
+            github_client=github_client,
+            owner=owner,
+            repo=repo,
+            use_parser=False,
+            verbose=False,
+            filter_directories=(
+                self.INVALID_FOLDERS,
+                GithubRepositoryReader.FilterType.EXCLUDE,
+            ),
+            filter_file_extensions=filter_file_extensions,
+        ).load_data(branch=branch, commit_sha=commit_sha)
 
     def search_repos_by_name(
         self, repo_names: List[str], timeout: int = 50, **kwargs
@@ -245,6 +322,24 @@ class GithubDataLoader:
         labels = response.get("labels", [])
         labels = list(labels) if isinstance(labels, dict) else labels
 
+        # find the base commit closest to created_at.
+        commits_url = f"{self.BASE_GITHUB_API_URL}/repos/{owner}/{name}/commits"
+        creation_date = response.get("created_at", "")
+        assert creation_date, "Invalid creation date"
+        creation_date = datetime.datetime.strptime(creation_date, "%Y-%m-%dT%H:%M:%SZ")
+        since_date = creation_date - datetime.timedelta(days=30)
+        until_date = creation_date
+
+        # Get commits around the creation date
+        params = {
+            "since": since_date.isoformat() + "Z",
+            "until": until_date.isoformat() + "Z",
+        }
+        commit_response = requests.get(commits_url, headers=headers, params=params)
+        assert commit_response.status_code == 200
+        commit_history = commit_response.json()
+        assert commit_history
+
         return GithubIssueItem(
             title=response.get("title", ""),
             labels=[label.get("name", "") for label in labels],
@@ -252,6 +347,7 @@ class GithubDataLoader:
             updated_at=response.get("updated_at", ""),
             closed_at=response.get("closed_at", ""),
             description=response.get("body", ""),
+            base_commit=commit_history[0]["sha"],
         )
 
 
@@ -395,12 +491,3 @@ class YoutubeDataLoader:
                 )
 
         return items
-
-
-if __name__ == "__main__":
-    github_loader = GithubDataLoader()
-    print(
-        github_loader.load_issue(
-            name="sympy", owner="sympy", issue_number=26134
-        ).description
-    )

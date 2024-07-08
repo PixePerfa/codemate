@@ -8,7 +8,7 @@ import datetime
 from rich import print
 from parsel import Selector
 from typing import List, Literal, Optional
-from pydantic import BaseModel
+from llama_index.core.bridge.pydantic import BaseModel, validator
 from translate import Translator
 from youtube_search import YoutubeSearch
 from llama_index.core import Document
@@ -24,6 +24,12 @@ class GithubRepoItem(BaseModel):
     stars: int
     forks: int
     commit_sha: str = None
+
+    @validator("repo_url", pre=True)
+    def validate_repo_url(cls, value):
+        if not value.startswith("https://github.com/"):
+            raise ValueError('repo_url must start with "https://github.com/"')
+        return value
 
 
 class GithubIssueItem(BaseModel):
@@ -67,6 +73,10 @@ class GithubDataLoader:
     def __init__(self, github_api_key: str) -> None:
         self._github_api_key = github_api_key
         os.environ["GITHUB_TOKEN"] = self._github_api_key
+
+    def _convert_repo_lang(self, repo_lang):
+        repo_lang_op = repo_lang.lower()
+        return repo_lang_op if repo_lang_op != "c++" else "cpp"
 
     def mock(self):
         mock_list = [
@@ -145,24 +155,19 @@ class GithubDataLoader:
             response = func(url, headers=headers, timeout=timeout, **kwargs)
             if response.status_code != 200:
                 assert f"Unable to retrieve {url}"
-            print(url)
             response = response.json()
             for item in response["items"]:
                 repo = f'https://github.com/{item["full_name"]}'
-                if (
-                    item.get("stargazers_count", 0) < 100
-                    or not item.get("full_name", "")
-                    or not item.get("description", "")
-                    or not item.get("language", "")
-                ):
+                if item.get("full_name", "").strip() != name.strip():
                     continue
-                desc = "".join(item["description"]).strip()
+                desc = item["description"]
+                desc = "" if desc is None else desc.strip()
                 name, owner = repo.split("/")[-1], repo.split("/")[-2]
                 items.append(
                     GithubRepoItem(
                         repo_url=repo,
                         desc=desc,
-                        lang=item["language"],
+                        lang=self._convert_repo_lang(item["language"]),
                         name=name,
                         owner=owner,
                         stars=item["stargazers_count"],
@@ -219,7 +224,7 @@ class GithubDataLoader:
                     GithubRepoItem(
                         repo_url=repo,
                         desc=trans_desc,
-                        lang=item["language"],
+                        lang=self._convert_repo_lang(item["language"]),
                         name=name,
                         owner=owner,
                         stars=item["stargazers_count"],
@@ -298,7 +303,7 @@ class GithubDataLoader:
                 GithubRepoItem(
                     repo_url=repo,
                     desc=trans_desc,
-                    lang=lang,
+                    lang=self._convert_repo_lang(lang),
                     stars=stars,
                     forks=forks,
                     name=name,

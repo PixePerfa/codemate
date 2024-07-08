@@ -92,6 +92,7 @@ class VectorDB:
                         size=self._emb_func.dimension,
                         distance=qdrant_models.Distance.COSINE,
                     ),
+                    shard_number=4,
                 )
         else:
             raise ValueError(f"DB Type {self._config.name} not supported!")
@@ -203,7 +204,10 @@ class VectorDB:
                 return _convert_to_chroma_op(results_with_payload)
 
     def add(
-        self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[Any]
+        self,
+        documents: List[str],
+        metadatas: List[Dict[str, Any]],
+        ids: List[Any],
     ):
         """Batch upsert documents to the collection"""
         if self._is_chroma_db:
@@ -211,6 +215,10 @@ class VectorDB:
                 documents=documents, metadatas=metadatas, ids=list(map(str, ids))
             )
         elif self._is_qdrant_db:
+            # openai has rate limit when embedding more than 1000 documents.
+            embeddings = []
+            for i in range(0, len(documents), 1000):
+                embeddings.extend(self._emb_func(documents[i : i + 1000]))
             self._client.upsert(
                 collection_name=self._collection_name,
                 points=qdrant_models.Batch(
@@ -224,6 +232,6 @@ class VectorDB:
                         {**metadata, **{"document": document}}
                         for metadata, document in zip(metadatas, documents)
                     ],
-                    vectors=self._emb_func(documents),
+                    vectors=embeddings,
                 ),
             )

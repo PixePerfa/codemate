@@ -6,9 +6,10 @@ import requests
 import globals
 import openai
 
+from rich import print
 from typing import Dict, Any, List, Optional
 from llama_index.core.llms import ChatMessage
-from pydantic.main import BaseModel
+from pydantic import BaseModel, validator, ValidationError
 from llama_index.core.tools.query_engine import QueryEngineTool
 from llama_index.core.tools.tool_spec.base import BaseToolSpec
 from openai import OpenAI as OG_OpenAI
@@ -16,11 +17,13 @@ from llama_index.llms.openai import OpenAI
 from llama_index.core.base.response.schema import Response
 
 from llama_index.agent.openai import OpenAIAgent
-from llama_index.core.schema import Document
 from llama_index.packs.code_hierarchy import (
     CodeHierarchyNodeParser,
 )
+from llama_index.core.schema import TextNode, NodeRelationship
+from llama_index.core.text_splitter import CodeSplitter
 from llama_index.packs.code_hierarchy import CodeHierarchyKeywordQueryEngine
+
 from external_data_loader import GithubDataLoader, GithubRepoItem
 from db_util import DBConfig, VectorDB
 
@@ -63,15 +66,19 @@ def chunk_repo(github_item: GithubRepoItem, github_access_token):
         repo=github_item.name,
         commit_sha=github_item.commit_sha,
     )
+    for doc in documents:
+        assert "file_path" in doc.metadata
+        doc.metadata["filepath"] = doc.metadata["file_path"]
+
     nodes = CodeHierarchyNodeParser(
         language=repo_lang,
         # You can further parameterize the CodeSplitter to split the code
         # into "chunks" that match your context window size using
         # chunck_lines and max_chars parameters, here we just use the defaults
-        # code_splitter=CodeSplitter(language="python"),
+        code_splitter=CodeSplitter(language=repo_lang, max_chars=2000, chunk_lines=50),
     ).get_nodes_from_documents(documents)
 
-    return nodes, documents
+    return nodes
 
 
 class GithubSearchTool(BaseToolSpec):
@@ -83,6 +90,7 @@ class GithubSearchTool(BaseToolSpec):
         "find_trending_github_repos",
         "find_relevant_repos",
         "get_github_issue_repo_item",
+        "get_github_repo_items",
     ]
 
     def __init__(self):
@@ -96,7 +104,7 @@ class GithubSearchTool(BaseToolSpec):
 
         client = instructor.from_openai(OG_OpenAI())
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo-16k",
+            model="gpt-4o",
             response_model=Response,
             messages=[
                 {
@@ -107,27 +115,31 @@ class GithubSearchTool(BaseToolSpec):
                     Follow these guidelines:
                     1) Do not create length topics more than 5 words.
                     2) Always use the key term in all topics. For example if query is about LLM always use LLM in each topic.
+                    3) Perform reasoning to find possible releated topics even though the terms are not mentioned in the query.
                     3) Do not use any irrelevant terms from the query to make a topic and all topics should be similar in context but
                     different enough to help find all relevant github repos related to the query.
                     4) Do not split key terms to make a new topic. For example Do not do 'LLM finetuning' -> ['LLM', 'finetuning']
-                    5) Make as less topics as possible because using these topics to search Github is expensive and rate limited.
+                    5) Make as less topics as possible because using these topics to search Github is expensive and rate limited. No more than 5
 
                     Example:
                     query: "relevant github repositories for LLM finetuning."
                     Correct Answer:
-                        topics: "['LLM finetuning']"
+                        topics: "['LLM finetuning', 'language models']"
                     Wrong Answer:
                         topics: "['LLM finetuning', 'LLM', 'finetuning']"
+                    query: "How are transformers implemented?"
+                    Correct Answer:
+                        topics : "['transformers']"
 
                     """,
                 },
                 {
                     "role": "user",
-                    "content": f"Generate 4 possible topics for query: {query}.",
+                    "content": f"Generate a list of topics for query: {query} which can be used to do github search.",
                 },
             ],
         )
-        return response
+        return response.output
 
     def check_if_repo_relevant(self, query: str, github_item: GithubRepoItem):
         class Response(BaseModel):
@@ -136,29 +148,13 @@ class GithubSearchTool(BaseToolSpec):
 
         client = instructor.from_openai(OG_OpenAI())
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo-16k",
+            model="gpt-4o",
             response_model=Response,
             messages=[
                 {
                     "role": "system",
                     "content": """
-                    You are helping a software engineer in figuring out if trending repository on github is relevant to a query they are interested in.
-                    They have given you a query and a github repo information. Follow these guidelines.
-                    1) Understand the query and try to break down into multiple possible topics.
-                    2) For each topic, think carefully if the topic is about a particular language or about partcular technique.
-                    3) Use all information about github repo to answer Yes or No if the repo can be relevant.
-                    4) If you are not totally sure, prefer saying NO.
 
-                    Give reasoning behind your reason of saying YES or NO.
-
-                    Example:
-                    query: "LLM"
-                    github_repo:
-                        description: Data framework for LLM applications
-
-                    Answer:
-                        is_relevant: True
-                        reason: the repo helps build integrating data into LLM to build applications.
                     """,
                 },
                 {
@@ -216,13 +212,13 @@ class GithubSearchTool(BaseToolSpec):
             message="All trending github repos currently.", content=items
         )
 
-    def find_relevant_repos(self, query: str) -> AgentResponse:
+    def find_relevant_repos(self, query: str, top_k: int = 1) -> AgentResponse:
         """Given a query, finds all relevant topics which can be searched on github and returns relevant github repos."""
 
         topics = self.generate_topics_from_query(query)
 
         items = GithubDataLoader(self._github_api_key).search_repos_by_topic(
-            topics=topics, min_stars=0, top_k=10
+            topics=topics, min_stars=0, top_k=top_k
         )
         return AgentResponse(
             message=f"""
@@ -259,6 +255,123 @@ class GithubSearchTool(BaseToolSpec):
                 which stores the base_commit which needs to be checked out to solve it.
                 """,
             content=issue_item,
+        )
+
+    def get_github_repo_items(self, query: str) -> AgentResponse:
+        """Given a query, performs query classification to construct the most relevant GithubRepoItems
+        and returns as part of response content.
+
+        Following the types of queries supported:
+
+        1) where github URL is explicitly given in query. Uses the githubURL to construct the item.
+        2) when github issue URL is explicitly given in query.
+        3) for any general query related to particular topic search.
+        """
+
+        # query classification
+        class Response(BaseModel):
+            github_repo_url: List[str] = []
+            github_issue_url: List[str] = []
+            requires_external_search: bool
+
+            @validator("github_repo_url", pre=True)
+            def validate_github_repo_url(cls, value):
+                regex = re.compile(r"https://github\.com/([^/]+)/([^/]+)")
+                for _val in value:
+                    match = regex.match(_val)
+                    if not match:
+                        raise ValueError(
+                            f'repo_url {_val} must start with "https://github.com/"'
+                        )
+                return value
+
+            @validator("github_issue_url", pre=True)
+            def validate_github_issue_url(cls, value):
+                regex = re.compile(r"https://github\.com/([^/]+)/([^/]+)/issues/(\d+)")
+                for _val in value:
+                    match = regex.match(_val)
+                    if not match:
+                        raise ValueError(
+                            f'issue url {_val} must start with "https://github.com/" and have "issues" and integer issue ID'
+                        )
+                return value
+
+        client = instructor.from_openai(OG_OpenAI())
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_model=Response,
+            messages=[
+                {
+                    "role": "system",
+                    "content": """
+                    You are an expert at understanding github related queries. Sometimes a query
+                    directly mentions a github repository or github issue URL. Referring the examples
+                    below find out all the relevant URLS mentioned in the query.
+
+                    Also, you need to tell if to solve the query we need to do external search to find
+                    relevant github repositories etc.
+
+                    Example queries and expected responses:
+
+                    Query #1: "How is transformer implemented in https://github.com/abc/xyz
+                    Response:
+                        github_repo_url: ["https://github.com/abc/xyz"]
+                        github_issue_url: []
+                        requires_github_topic_search: False
+
+                    Query #2: "Find me relevant files to solve issue https://github.com/hello/world/issues/7
+                    Response:
+                        github_repo_url: []
+                        github_issue_url: ["https://github.com/hello/world/issues/7"]
+                        requires_github_topic_search: False
+
+                    Query #3: "I want to learn about transformers."
+                    Response:
+                        github_repo_url: []
+                        github_issue_url: []
+                        requires_github_topic_search: True
+
+                    Make sure to not mark any URL specified in the query as repo url or issue_url. They should
+                    pass the validations specified in the response model.
+                    """,
+                },
+                {
+                    "role": "user",
+                    "content": f"Help me understand about this query: {query}.",
+                },
+            ],
+        )
+
+        github_repo_items = []
+
+        if response.requires_external_search:
+            github_repo_items.extend(self.find_relevant_repos(query).content)
+        for repo_url in response.github_repo_url:
+            pattern = r"https://github\.com/([^/]+)/([^/]+)"
+            match = re.match(pattern, repo_url)
+            owner = match.group(1)
+            repo = match.group(2)
+            full_name = f"{owner}/{repo}"
+            github_repo_items.append(
+                GithubDataLoader(self._github_api_key).search_repos_by_name(
+                    repo_names=[full_name]
+                )
+            )
+        for issue_url in response.github_issue_url:
+            issue_content = self.get_github_issue_repo_item(issue_url).content
+            if issue_content:
+                github_repo_items.append(issue_content.repo_item)
+        if not github_repo_items:
+            return AgentResponse(
+                message=f"Not able to find any github repo items for query: {query}. Rewrite the query and try again.",
+                content=github_repo_items,
+            )
+
+        return AgentResponse(
+            message=f"""
+                Found list of repo items relevant for query: {query}
+                """,
+            content=github_repo_items,
         )
 
 
@@ -412,10 +525,14 @@ class InternalDatabaseSearch(BaseToolSpec):
                         {"summary": metadata_nodes["documents"][i]}
                     )
             else:
-                nodes, code_documents = chunk_repo(item, self.github_access_token)
-                tool_map_dict = CodeHierarchyNodeParser.get_code_hierarchy_from_nodes(
+                nodes = chunk_repo(item, self.github_access_token)
+                (
+                    tool_map_dict,
+                    markdown_dict,
+                ) = CodeHierarchyNodeParser.get_code_hierarchy_from_nodes(
                     nodes, max_depth=0
-                )[0]
+                )
+                print(markdown_dict)
                 num_tries = 3
                 max_depth_to_consider = 3
                 summary = None
@@ -461,10 +578,11 @@ class InternalDatabaseSearch(BaseToolSpec):
                     metadatas=[item.dict()],
                     ids=[id_prefix],
                 )
-                documents = [doc.text for doc in code_documents]
-                doc_metadata = [doc.dict() for doc in code_documents]
-                for m in doc_metadata:
-                    m.pop("text", None)
+                # filter out code documents which can't be embedding.
+                documents = [node.text for node in nodes if node.text]
+                metadatas = [node.dict() for node in nodes if node.text]
+
+                for m in metadatas:
                     cur_keys = list(m.keys())
                     for k in cur_keys:
                         if m[k] is None:
@@ -476,17 +594,15 @@ class InternalDatabaseSearch(BaseToolSpec):
 
                 self.code_db.add(
                     documents=documents,
-                    ids=list(
-                        map(lambda x: f"{id_prefix}_{x}", range(len(code_documents)))
-                    ),
+                    ids=list(map(lambda x: f"{id_prefix}_{x}", range(len(documents)))),
                     metadatas=list(
                         map(
                             lambda x: {
                                 **item.dict(),
                                 "node_id": x,
-                                **doc_metadata[x],
+                                **metadatas[x],
                             },
-                            range(len(code_documents)),
+                            range(len(documents)),
                         )
                     ),
                 )
@@ -553,57 +669,63 @@ class CodeAnalyzerTool(BaseToolSpec):
             break
         return desc if desc is not None else ""
 
-    def make_nodes_from_documents(self, chroma_nodes):
-        documents = []
-        for doc, metadata in zip(chroma_nodes["documents"], chroma_nodes["metadatas"]):
-            documents.append(
-                Document(
-                    text=doc,
-                    id_=metadata["id_"],
-                    relationships=json.loads(metadata["relationships"]),
-                    class_name=metadata["class_name"],
+    def make_code_hierarchy_nodes(self, metadatas):
+        nodes = []
+
+        def get_node_relationship(value):
+            for member in NodeRelationship:
+                if member.value == value:
+                    return member
+            return None
+
+        for meta in metadatas:
+            rels = {
+                get_node_relationship(k): v
+                for k, v in json.loads(meta["relationships"]).items()
+                if v is not None
+            }
+            nodes.append(
+                TextNode(
+                    text=meta["text"],
+                    id_=meta["id_"],
+                    relationships=rels,
+                    class_name=meta["class_name"],
                     excluded_embed_metadata_keys=json.loads(
-                        metadata["excluded_embed_metadata_keys"]
+                        meta["excluded_embed_metadata_keys"]
                     ),
                     excluded_llm_metadata_keys=json.loads(
-                        metadata["excluded_llm_metadata_keys"]
+                        meta["excluded_llm_metadata_keys"]
                     ),
-                    metadata=json.loads(metadata["metadata"]),
-                    metadata_seperator=metadata["metadata_seperator"],
-                    node_id=metadata["node_id"],
-                    text_template=metadata["text_template"],
-                    metadata_template=metadata["metadata_template"],
+                    metadata=json.loads(meta["metadata"]),
+                    metadata_seperator=meta["metadata_seperator"],
+                    node_id=meta["node_id"],
+                    text_template=meta["text_template"],
+                    metadata_template=meta["metadata_template"],
                 )
             )
-        return CodeHierarchyNodeParser(
-            language="python",
-            # You can further parameterize the CodeSplitter to split the code
-            # into "chunks" that match your context window size using
-            # chunck_lines and max_chars parameters, here we just use the defaults
-            # code_splitter=CodeSplitter(language="python"),
-        ).get_nodes_from_documents(documents)
+        return nodes
 
-    def make_agent(self, github_repo_urls: List[str]) -> AgentResponse:
+    def make_agent(self, repoItems: List[GithubRepoItem]) -> AgentResponse:
         """
         Given a list of github repo urls, create a list of openAI agents to chat with.
         """
 
-        def _make_agent(repo_url, nodes):
+        def _make_agent(repoItem, nodes):
             query_engine = CodeHierarchyKeywordQueryEngine(
                 nodes=nodes,
             )
             tool = QueryEngineTool.from_defaults(
                 query_engine=query_engine,
                 name="code_lookup",
-                description=f"Useful for looking up information about the {repo_url} codebase.",
+                description=f"Useful for looking up information about the {repoItem.repo_url} codebase.",
             )
             tool_instructions = query_engine.get_tool_instructions()
             system_prompt = f"""
 
             You are principal software engineer with deep understanding of the following gitub
             repo:
-            repo_url: {repo_url}
-            repo_description: {self.get_repo_desc(repo_url)}
+            repo_url: {repoItem.repo_url}
+            repo_description: {self.get_repo_desc(repoItem.repo_url)}
 
             You are onboarding an early AI engineer to understand the the repo's codebase.
             They will give you the query for a repo. You have to access to a code lookup tool
@@ -618,45 +740,78 @@ class CodeAnalyzerTool(BaseToolSpec):
                 [tool], llm=self.llm, system_prompt=system_prompt, verbose=False
             )
 
-        for repo_url in set(github_repo_urls):
-            if repo_url in self._agents:
+        for repoItem in repoItems:
+            repoItemstr = json.dumps(repoItem.dict())
+            if repoItemstr in self._agents:
                 continue
-            nodes = self.code_db.filter({"repo_url": repo_url})
+
+            filter_query = {"repo_url": repoItem.repo_url}
+            if repoItem.commit_sha:
+                filter_query.update({"commit_sha": repoItem.commit_sha})
+
+            nodes = self.code_db.filter(filter_query)
+
             if not len(nodes["metadatas"]):
                 return AgentResponse(
                     message="""
-                Following github URLs are not present in the database. Please index them into the internal database first using
+                Following github repoItem is not present in the database. Please index them into the internal database first using
                 add_github_repos tool from InternalDatabaseSearch Agent.
                 """,
-                    content=repo_url,
+                    content=repoItem,
                 )
 
-            nodes = self.make_nodes_from_documents(nodes)
+            nodes = self.make_code_hierarchy_nodes(nodes["metadatas"])
 
             if not len(nodes):
                 return AgentResponse(
                     message=f"""
-                Not able to process data for {repo_url} from internal database. Gently respond the user that we are not able
+                Not able to process data for {repoItemstr} from internal database. Gently respond the user that we are not able
                 to process this repo url to provide any information related to it.
                 """,
-                    content=repo_url,
+                    content=repoItem,
                 )
-            self._agents[repo_url] = _make_agent(repo_url, nodes)
+            self._agents[repoItemstr] = _make_agent(repoItem, nodes)
 
         return AgentResponse(
             message="Created agents for all github urls. You can now ask any queries related to them.",
             content=None,
         )
 
-    def chat(self, repo_url: str, query: str) -> AgentResponse:
+    def _validate_input(self, ip) -> AgentResponse:
+        try:
+            return AgentResponse(message="", content=GithubRepoItem.parse_obj(ip))
+        except ValidationError:
+            return AgentResponse(
+                message=f"""
+                Not able to use input: {ip}.
+                Make sure to follow the schema of GithubRepoItem pydantic BaseModel for the input:
+                {GithubRepoItem.schema_json()}
+                """,
+                content=None,
+            )
+
+    def chat(self, repoItem: GithubRepoItem, query: str) -> AgentResponse:
         """
-        Given a repo_url answer the query by chatting with an agent for that repo.
+        Given a repo item answer the query by chatting with an agent for that repo.
+
+        repoItem: GitubRepoItem Pydantic BaseModel object
+        query: Input query for which the chat will be performed on the repoItem.
         """
-        agent_response = self.make_agent([repo_url])
+
+        validateResponse = self._validate_input(repoItem)
+        if validateResponse.message:
+            return validateResponse
+        else:
+            repoItem = validateResponse.content
+
+        agent_response = self.make_agent([repoItem])
         if agent_response.content is not None:
             return agent_response
 
-        response = self._agents[repo_url].chat(query)
+        repoItemstr = json.dumps(repoItem.dict())
+        response = self._agents[repoItemstr].chat(query)
+
+        # get code chunks from both tool based and semantic similarity based
 
         code_chunks = ""
 
@@ -670,7 +825,7 @@ class CodeAnalyzerTool(BaseToolSpec):
                 code_chunks += "\n\n"
         response_str = str(response)
 
-        repo_desc = self.get_repo_desc(repo_url)
+        repo_desc = self.get_repo_desc(repoItem.repo_url)
         messages = []
         messages.append(
             ChatMessage(
@@ -699,7 +854,7 @@ class CodeAnalyzerTool(BaseToolSpec):
 
         Query: {query}
 
-        URL: {repo_url}
+        URL: {repoItem.repo_url}
         Description: {repo_desc}
         Code Lookup Tool Output: {response_str}
         """,
@@ -707,24 +862,44 @@ class CodeAnalyzerTool(BaseToolSpec):
         )
         return AgentResponse(message=response.sources, content=str(response))
 
-    def compare(self, repo_a_url: str, repo_b_url: str, query: str) -> AgentResponse:
+    def compare(
+        self, repoItemA: GithubRepoItem, repoItemB: GithubRepoItem, query: str
+    ) -> AgentResponse:
         """
-        Given a query compares the code in two repos and yield a response
+        Given a two github repoItems, compares the code in two repos for a query and yield a response
+
+        repoItemA: GitubRepoItem Pydantic BaseModel object
+        repoItemB: GitubRepoItem Pydantic BaseModel object
+        query: Input query for which the comparison will be performed on repoItemA and repoItemB.
         """
-        if repo_a_url == repo_b_url:
+        # seems like there are no validations done by the agent.
+        validateResponseA = self._validate_input(repoItemA)
+        validateResponseB = self._validate_input(repoItemB)
+        if validateResponseA.message:
+            return validateResponseA
+        else:
+            repoItemA = validateResponseA.content
+        if validateResponseB.message:
+            return validateResponseB
+        else:
+            repoItemB = validateResponseB.content
+
+        if repoItemA.repo_url == repoItemB.repo_url:
             return AgentResponse(
                 message="Please ask user to pass valid inputs for comparison. Both github repo URLs are identical and can't do comparison on identical things.",
                 content=None,
             )
-        agent_response = self.make_agent([repo_a_url, repo_b_url])
+        agent_response = self.make_agent([repoItemA, repoItemB])
         if agent_response.content is not None:
             return agent_response
 
-        response_a = str(self._agents[repo_a_url].chat(query))
-        response_b = str(self._agents[repo_b_url].chat(query))
+        repoItemAstr = json.dumps(repoItemA.dict())
+        repoItemBstr = json.dumps(repoItemB.dict())
+        response_a = str(self._agents[repoItemAstr].chat(query))
+        response_b = str(self._agents[repoItemBstr].chat(query))
         # compare the response from both repos and construct the output.
-        repo_desc_a = self.get_repo_desc(repo_a_url)
-        repo_desc_b = self.get_repo_desc(repo_b_url)
+        repo_desc_a = self.get_repo_desc(repoItemA.repo_url)
+        repo_desc_b = self.get_repo_desc(repoItemB.repo_url)
 
         messages = []
         messages.append(
@@ -752,14 +927,14 @@ class CodeAnalyzerTool(BaseToolSpec):
 
         Repo 1:
 
-        URL: {repo_a_url}
+        URL: {repoItemA.repo_url}
         Description: {repo_desc_a}
         Code Lookup Tool Output: {response_a}
 
 
         Repo 2:
 
-        URL: {repo_b_url}
+        URL: {repoItemB.repo_url}
         Description: {repo_desc_b}
         Code Lookup Tool Output: {response_b}
         """,
